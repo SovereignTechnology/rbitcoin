@@ -1405,3 +1405,44 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
 
     tp.shutdown().await;
 }
+
+/// Under regtest retargeting the template at a retarget height carries the
+/// retargeted bits, and a solution ground against them becomes the tip. The
+/// pad's 600 s blocks are 60x slower than the 10 s target, so height 102 takes
+/// the 4x clamp: `0x1f00ffff` becomes `0x1f03fffc`.
+#[tokio::test(flavor = "multi_thread")]
+async fn template_target_follows_a_regtest_retarget() {
+    const START: u32 = 0x1f00_ffff;
+    const EASIER: u32 = 0x1f03_fffc;
+    let mut params = ChainParams::regtest();
+    params.apply_regtest_pow_bits(START).unwrap();
+    params.apply_regtest_retarget(10, 51).unwrap();
+    let tc = padded_chain_with("sv2-retarget", 1, params);
+    assert_eq!(tc.chain.tip_height(), Some(101));
+    assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), START);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    assert_eq!(header.bits.to_consensus(), EASIER);
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+    assert_eq!(tc.chain.tip_header().unwrap().bits.to_consensus(), EASIER);
+
+    tp.shutdown().await;
+}

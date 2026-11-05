@@ -494,8 +494,13 @@ pub struct NodeConfig {
     pub uacomments: Vec<String>,
     /// `--test-activation-height=name@height` (regtest).
     pub test_activation_heights: Vec<(String, u32)>,
-    /// `--regtest-pow-bits` compact bits fixed for every regtest block >= 1.
+    /// `--regtest-pow-bits` compact bits fixed for every regtest block >= 1, or
+    /// only through the first retarget height when regtest retargeting is on.
     pub regtest_pow_bits: Option<u32>,
+    /// `--regtest-block-time` seconds per block that regtest retargets toward.
+    pub regtest_block_time: Option<u64>,
+    /// `--regtest-retarget-interval` blocks per regtest retarget period.
+    pub regtest_retarget_interval: Option<u32>,
     /// Do not evict/ban inbound (`--trusted`; Core functional `-whitelist=noban`).
     pub trusted: bool,
     /// Always announce inbound txs (`--always-relay`; Core `forcerelay`).
@@ -614,6 +619,8 @@ impl Default for NodeConfig {
             uacomments: Vec::new(),
             test_activation_heights: Vec::new(),
             regtest_pow_bits: None,
+            regtest_block_time: None,
+            regtest_retarget_interval: None,
             trusted: false,
             always_relay: false,
             relay: false,
@@ -778,6 +785,13 @@ impl NodeConfig {
             params
                 .apply_regtest_pow_bits(bits)
                 .map_err(|e| NodeError::Config(format!("regtest_pow_bits: {e}")))?;
+        }
+        if self.regtest_block_time.is_some() || self.regtest_retarget_interval.is_some() {
+            let block_time = self.regtest_block_time.unwrap_or(10 * 60);
+            let interval = self.regtest_retarget_interval.unwrap_or(2016);
+            params
+                .apply_regtest_retarget(block_time, interval)
+                .map_err(|e| NodeError::Config(format!("regtest retarget: {e}")))?;
         }
         Ok(params)
     }
@@ -1633,6 +1647,17 @@ impl NodeConfig {
                     ChainParams::parse_regtest_pow_bits(val)
                         .map_err(|e| NodeError::Config(format!("conf regtest_pow_bits: {e}")))?,
                 );
+            }
+            "regtest_block_time" => {
+                self.regtest_block_time = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf regtest_block_time: {e}")))?,
+                );
+            }
+            "regtest_retarget_interval" => {
+                self.regtest_retarget_interval = Some(val.parse().map_err(|e| {
+                    NodeError::Config(format!("conf regtest_retarget_interval: {e}"))
+                })?);
             }
             "persist_mempool" => {
                 self.mempool.persist = parse_conf_bool(val)
