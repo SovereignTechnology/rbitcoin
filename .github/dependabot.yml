@@ -65,6 +65,8 @@ updates:
       actions:
         patterns:
           - "*"
+    cooldown:
+      default-days: 7
 
   # --- Nix flakes (flake.lock inputs) ---------------------------------------
   - package-ecosystem: "nix"
@@ -79,3 +81,5 @@ updates:
       - "nix"
     commit-message:
       prefix: "deps(nix)"
+    cooldown:
+      default-days: 7
