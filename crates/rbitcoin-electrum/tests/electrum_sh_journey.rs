@@ -467,7 +467,8 @@ pub async fn listunspent_skips_unused(
 /// A broadcast of a tx already in the pool answers its txid, as electrs in
 /// front of Core does (Core `BroadcastTransaction`): the same bytes, and the
 /// same txid under another witness. `fresh` is not pooled yet; `relayed`
-/// came from a peer. A tx with a missing input is still a reject.
+/// came from a peer. A tx with a missing input is still a reject, code 2
+/// as electrs answers a bitcoind refusal; hex that is not a tx is code 1.
 async fn broadcast_of_a_pooled_tx_answers_its_txid(
     q: &Arc<Query>,
     hub: &Arc<MempoolHub>,
@@ -502,6 +503,22 @@ async fn broadcast_of_a_pooled_tx_answers_its_txid(
         broadcast(&orphan).await,
         Err("bad-txns-inputs-missingorspent".to_string())
     );
+    let refused = electrum_tcp_rpc(
+        &mut stream,
+        2,
+        "blockchain.transaction.broadcast",
+        json!([serialize_hex(&orphan)]),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], 2, "{refused}");
+    let garbage = electrum_tcp_rpc(
+        &mut stream,
+        3,
+        "blockchain.transaction.broadcast",
+        json!(["00"]),
+    )
+    .await;
+    assert_eq!(garbage["error"]["code"], 1, "{garbage}");
     handle.shutdown().await;
 }
 

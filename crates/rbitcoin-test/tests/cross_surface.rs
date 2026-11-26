@@ -1467,8 +1467,8 @@ async fn pin_rest_deployment_and_filter(rpc_addr: SocketAddr, tip: &str) {
 
 /// Electrum `blockchain.transaction.broadcast` and Esplora `POST /tx` refuse
 /// `tx_hex` with the code and reason `sendrawtransaction` gives, in the
-/// shape electrs forwards Core's: the bare reason on Electrum, and
-/// `sendrawtransaction RPC error: {"code":..,"message":..}` on Esplora.
+/// shape electrs forwards Core's: code 2 and the bare reason on Electrum,
+/// and `sendrawtransaction RPC error: {"code":..,"message":..}` on Esplora.
 async fn pin_broadcast_reject_matches_sendraw(
     rpc_addr: SocketAddr,
     electrum_addr: SocketAddr,
@@ -1486,6 +1486,7 @@ async fn pin_broadcast_reject_matches_sendraw(
         json!([tx_hex]),
     )
     .await;
+    assert_eq!(got["error"]["code"], 2, "electrum: {got}");
     assert_eq!(got["error"]["message"], reason, "electrum: {got}");
     let (st, body) = http_post(esplora_addr, "/tx", tx_hex).await;
     assert_eq!(

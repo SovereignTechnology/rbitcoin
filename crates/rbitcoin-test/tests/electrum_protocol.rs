@@ -1862,7 +1862,8 @@ async fn electrum_leftover_mempool_does_not_double_count() {
     )
     .await;
     assert_eq!(
-        bad_tx["error"]["message"], "bad-txns-inputs-missingorspent",
+        bad_tx["error"],
+        json!({"code": 2, "message": "bad-txns-inputs-missingorspent"}),
         "missing-input broadcast with hub: {bad_tx}"
     );
 

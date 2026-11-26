@@ -3077,7 +3077,8 @@ async fn pin_blocksonly_electrum_esplora_broadcast(
     )
     .await;
     assert_eq!(
-        bad["error"]["message"], "bad-txns-inputs-missingorspent",
+        bad["error"],
+        json!({"code": 2, "message": "bad-txns-inputs-missingorspent"}),
         "electrum missing-input broadcast must hit the hub: {bad}"
     );
 

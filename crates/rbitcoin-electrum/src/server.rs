@@ -168,6 +168,30 @@ pub const MAX_ELECTRUM_IDLE_TIMEOUT_SECS: u64 = 86_400;
 pub const DEFAULT_MAX_BROADCAST_HEX: usize = 8_388_608;
 const RAW_TX_NOT_FOUND: &str =
     "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.";
+/// electrs `RpcError::BadRequest`: a request the server cannot serve.
+const BAD_REQUEST: i64 = 1;
+/// electrs `RpcError::DaemonError`: bitcoind refused the call.
+const DAEMON_ERROR: i64 = 2;
+
+/// A failed request's error object: electrs's code and the message.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplyError {
+    pub code: i64,
+    pub message: String,
+}
+
+impl From<String> for ReplyError {
+    /// [`RAW_TX_NOT_FOUND`] is bitcoind's `getrawtransaction` miss. Every
+    /// other message is the server's own.
+    fn from(message: String) -> Self {
+        let code = if message == RAW_TX_NOT_FOUND {
+            DAEMON_ERROR
+        } else {
+            BAD_REQUEST
+        };
+        Self { code, message }
+    }
+}
 
 /// Shared application DoS bounds for internet-facing query surfaces.
 ///
@@ -1325,7 +1349,7 @@ async fn land<W: AsyncWrite + Unpin>(
         conn,
         last_sent,
         flight.asked,
-        result,
+        result.map_err(ReplyError::from),
         stamped,
         Took::Ran(ran),
     );
@@ -1460,9 +1484,11 @@ async fn answer_one(
                 broadcast_raw_tx_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
             }
             "blockchain.transaction.broadcast_package" => {
-                broadcast_package_async(&asked.params, ctx.config, ctx.mempool.as_ref()).await
+                broadcast_package_async(&asked.params, ctx.config, ctx.mempool.as_ref())
+                    .await
+                    .map_err(ReplyError::from)
             }
-            _ => Err("unknown broadcast".into()),
+            _ => Err(ReplyError::from("unknown broadcast".to_string())),
         };
         return Ok(finish_reply(
             ctx,
@@ -1489,7 +1515,7 @@ async fn answer_one(
             conn,
             last_sent,
             asked,
-            result,
+            result.map_err(ReplyError::from),
             None,
             Took::Since(t0),
         ));
@@ -1519,7 +1545,7 @@ async fn answer_one(
         conn,
         last_sent,
         asked,
-        result,
+        result.map_err(ReplyError::from),
         stamped,
         Took::Since(t0),
     ))
@@ -1532,7 +1558,7 @@ fn finish_reply(
     conn: &ElectrumConn,
     last_sent: &mut HashMap<[u8; 32], String>,
     asked: Asked,
-    result: Result<Value, String>,
+    result: Result<Value, ReplyError>,
     stamped: Option<ChainView>,
     took: Took,
 ) -> Value {
@@ -1569,17 +1595,16 @@ fn finish_reply(
             );
             rpc_result(&id, &v, stamped.as_ref())
         }
-        Err(e) => {
+        Err(ReplyError { code, message }) => {
             rbitcoin_log::api_call(
                 "electrum",
                 &ctx.peer.to_string(),
                 method,
                 &params_s,
                 wall_ms,
-                Some(&e),
+                Some(&message),
             );
-            let code = if e == RAW_TX_NOT_FOUND { 2 } else { 1 };
-            json!({"jsonrpc":"2.0","id": id, "error": {"code": code, "message": e}})
+            json!({"jsonrpc":"2.0","id": id, "error": {"code": code, "message": message}})
         }
     }
 }
@@ -3462,13 +3487,14 @@ fn package_broadcast_value(verbose: bool, accepted: &[rbitcoin_net::AcceptResult
 }
 
 /// Accept one raw tx, with script verify awaited on the connection task. A tx
-/// whose txid is already pooled answers the txid too. A refusal is the
-/// message `sendrawtransaction` gives, which electrs forwards from Core.
+/// whose txid is already pooled answers the txid too. A refusal is
+/// [`DAEMON_ERROR`] with the message `sendrawtransaction` gives, as electrs
+/// forwards Core's.
 pub async fn broadcast_raw_tx_async(
     params: &Value,
     config: &ElectrumConfig,
     mempool: Option<&Arc<MempoolHub>>,
-) -> Result<Value, String> {
+) -> Result<Value, ReplyError> {
     let tx = broadcast_tx_from_params(params, config)?;
     let mp = mempool
         .ok_or_else(|| "mempool not available".to_string())?
@@ -3477,7 +3503,10 @@ pub async fn broadcast_raw_tx_async(
     let budget = mp.query.api_read_budget();
     rbitcoin_net::with_store_budget(budget, ApiSurface::Electrum, mp.broadcast_client_async(tx))
         .await
-        .map_err(|reject| reject.message)?;
+        .map_err(|reject| ReplyError {
+            code: DAEMON_ERROR,
+            message: reject.message,
+        })?;
     Ok(json!(txid.to_string()))
 }
 
