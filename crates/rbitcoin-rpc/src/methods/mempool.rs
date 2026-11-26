@@ -4,7 +4,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use rbitcoin_consensus::policy::DEFAULT_MAX_RAW_TX_FEE_SAT_KVB;
 use rbitcoin_net::{
-    accept_reject_reason, package_has_conflicts, submit_tx_version_nonstandard, MempoolHub,
+    package_has_conflicts, submit_tx_version_nonstandard, BroadcastReject, MempoolHub,
     QueryUtxoProvider, TestAcceptRow, TestAcceptVerdict, UtxoProvider,
 };
 use rbitcoin_primitives::Fk;
@@ -1141,15 +1141,8 @@ fn sendraw_after_accept(
             Ok(json!(hash_hex_display(&tid.to_byte_array())))
         }
         Err(e) => {
-            let reason = accept_reject_reason(&e);
-            // Core maps MISSING_INPUTS to RPC_TRANSACTION_ERROR (-25) and
-            // `bad-txns-inputs-missingorspent`. testmempoolaccept keeps
-            // the reason string `missing-inputs`.
-            if reason == "missing-inputs" {
-                Err(rpc_error(ERR_VERIFY_ERROR, MISSING_OR_SPENT))
-            } else {
-                Err(rpc_error(ERR_VERIFY_REJECTED, reason))
-            }
+            let reject = BroadcastReject::of(&e);
+            Err(rpc_error(reject.code, reject.message))
         }
     }
 }
@@ -1157,47 +1150,16 @@ fn sendraw_after_accept(
 /// Core `BroadcastTransaction` returns `-27` when one of the tx's own outputs
 /// is still a coin. Burn is already handled. Version and max fee are later.
 fn reject_outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<(), Value> {
-    if outputs_already_in_utxo_set(ctx, tx)? {
-        return Err(rpc_error(
-            ERR_VERIFY_ALREADY_IN_UTXO_SET,
-            "Transaction outputs already in utxo set",
-        ));
+    let confirmed = ctx
+        .query
+        .outputs_already_in_utxo_set(tx)
+        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?;
+    if confirmed {
+        let reject = BroadcastReject::already_in_utxo_set();
+        return Err(rpc_error(reject.code, reject.message));
     }
     Ok(())
 }
-
-/// True when a spendable output of `tx` is an unspent confirmed coin.
-fn outputs_already_in_utxo_set(ctx: &RpcContext, tx: &Transaction) -> Result<bool, Value> {
-    let txid = tx.compute_txid().to_byte_array();
-    // ConnectBlock never adds the genesis coinbase. No spender does not
-    // make that output a coin.
-    if txid == genesis_coinbase_txid(ctx) {
-        return Ok(false);
-    }
-    let Some(fk) = confirmed_tip_fk(ctx, &txid)? else {
-        return Ok(false);
-    };
-    let vouts: Vec<u32> = tx
-        .output
-        .iter()
-        .enumerate()
-        .filter(|(_, out)| {
-            !rbitcoin_consensus::policy::is_unspendable(out.script_pubkey.as_bytes())
-        })
-        .map(|(i, _)| i as u32)
-        .collect();
-    if vouts.is_empty() {
-        return Ok(false);
-    }
-    let unspent = ctx
-        .query
-        .unspent_create_vouts(fk, &vouts)
-        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?;
-    Ok(!unspent.is_empty())
-}
-
-/// Core `TransactionError::MISSING_INPUTS` text on `sendrawtransaction`.
-const MISSING_OR_SPENT: &str = "bad-txns-inputs-missingorspent";
 
 fn testmempoolaccept_args(params: &RpcParams) -> Result<(&[Value], u64), Value> {
     params.reject_unknown(&["rawtxs", "maxfeerate"])?;
@@ -1281,27 +1243,6 @@ pub async fn testmempoolaccept_async(
     Ok(test_accept_json(
         mp.test_accept_rows_async(decoded, max_feerate).await,
     ))
-}
-
-/// Confirmed-strong create on the active chain, if this txid has one.
-fn confirmed_tip_fk(ctx: &RpcContext, txid: &[u8; 32]) -> Result<Option<Fk>, Value> {
-    let Some(fk) = ctx
-        .query
-        .tx_fk_by_txid_tip(txid)
-        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
-    else {
-        return Ok(None);
-    };
-    if ctx
-        .query
-        .store()
-        .is_confirmed_strong(fk)
-        .map_err(|e| rpc_error(ERR_MISC, format!("query failed: {e}")))?
-    {
-        Ok(Some(fk))
-    } else {
-        Ok(None)
-    }
 }
 
 /// Core `ParseConfirmTarget`: an `int` (else `JSON integer out of range`) in `1..=1008`.
@@ -2089,11 +2030,7 @@ fn submitpackage_apply(
 
 #[doc(hidden)]
 pub fn submitpackage_member_error(e: &impl std::fmt::Display) -> String {
-    let mapped = accept_reject_reason(e);
-    if mapped == "missing-inputs" {
-        return MISSING_OR_SPENT.into();
-    }
-    mapped
+    BroadcastReject::of(e).message
 }
 
 pub fn gettxspendingprevout(ctx: &RpcContext, params: &RpcParams) -> Result<Value, Value> {
